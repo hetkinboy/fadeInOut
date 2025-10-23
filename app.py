@@ -23,7 +23,7 @@ target_bitrate = st.sidebar.selectbox("Bitrate xuất", ["128k", "192k", "256k",
 prefix_out = st.sidebar.text_input("Prefix tên file xuất", value="faded_")
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Gợi ý: nếu file ngắn, hãy giảm thời gian fade để tránh nuốt mất nội dung.")
+st.sidebar.caption("upload toàn bộ file lên, bấm xử lý và file zip. Sau đó download")
 
 # =============== UPLOAD ===============
 uploaded_files = st.file_uploader("Chọn các file MP3", type=["mp3"], accept_multiple_files=True)
