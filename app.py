@@ -5,12 +5,16 @@ from datetime import datetime
 import streamlit as st
 from pydub import AudioSegment
 
-# ====================== CẤU HÌNH TRANG ======================
+# =============== CẤU HÌNH & STATE ===============
 st.set_page_config(page_title="MP3 Fade In/Out Zipper", page_icon="🎧", layout="centered")
+
+if "processing" not in st.session_state:
+    st.session_state.processing = False  # đang xử lý hay không
+
 st.title("🎧 MP3 Fade In/Out → ZIP")
 st.caption("Upload nhiều file MP3, đặt thời gian fade in/out, rồi tải về 1 file ZIP.")
 
-# ====================== SIDEBAR: THIẾT LẬP ======================
+# =============== SIDEBAR: THIẾT LẬP ===============
 st.sidebar.header("Thiết lập Fade")
 fade_in_ms = int(st.sidebar.number_input("Fade In (ms)", min_value=0, max_value=120_000, value=2000, step=100))
 fade_out_ms = int(st.sidebar.number_input("Fade Out (ms)", min_value=0, max_value=120_000, value=3000, step=100))
@@ -21,11 +25,16 @@ prefix_out = st.sidebar.text_input("Prefix tên file xuất", value="faded_")
 st.sidebar.markdown("---")
 st.sidebar.caption("Gợi ý: nếu file ngắn, hãy giảm thời gian fade để tránh nuốt mất nội dung.")
 
-# ====================== UPLOAD ======================
+# =============== UPLOAD ===============
 uploaded_files = st.file_uploader("Chọn các file MP3", type=["mp3"], accept_multiple_files=True)
-process_btn = st.button("Xử lý & tạo ZIP", disabled=not uploaded_files)
 
-# ====================== HÀM PHỤ TRỢ ======================
+# Nút xử lý: bị disable khi chưa có file hoặc đang xử lý
+process_clicked = st.button(
+    "Xử lý & tạo ZIP",
+    disabled=(not uploaded_files) or st.session_state.processing,
+)
+
+# =============== HÀM PHỤ TRỢ ===============
 def safe_fade(segment: AudioSegment, fade_in_ms: int, fade_out_ms: int) -> AudioSegment:
     """
     Đảm bảo tổng thời gian fade không vượt quá độ dài track.
@@ -43,66 +52,74 @@ def safe_fade(segment: AudioSegment, fade_in_ms: int, fade_out_ms: int) -> Audio
 
 def normalize_peak(seg: AudioSegment, headroom_db: float = 1.0) -> AudioSegment:
     """
-    Giảm gain để peak còn -headroom_db dBFS (tránh clip).
-    Không dùng audioop; chỉ dùng pydub.
+    Hạ gain để peak còn ~ -headroom_db dBFS, tránh clip.
     """
     try:
         if seg.max_dBFS > -headroom_db:
             change_db = -(seg.max_dBFS + headroom_db)
             return seg.apply_gain(change_db)
     except Exception:
-        # Nếu backend không trả max_dBFS hợp lệ, bỏ qua normalize
         pass
     return seg
 
-# ====================== XỬ LÝ ======================
-if process_btn:
+# =============== XỬ LÝ ===============
+if process_clicked:
+    st.session_state.processing = True  # khóa nút ngay khi click
+
+if st.session_state.processing:
     if not uploaded_files:
         st.warning("Hãy chọn ít nhất 1 file MP3.")
+        st.session_state.processing = False
     else:
         zip_buffer = io.BytesIO()
         errors = []
+        progress = st.progress(0, text="Đang xử lý...")
+        log_area = st.empty()
 
-        with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for f in uploaded_files:
-                try:
-                    # Đọc mp3
-                    src = AudioSegment.from_file(f, format="mp3")
+        try:
+            with st.spinner("Đang xử lý & nén ZIP..."):
+                total = len(uploaded_files)
+                with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for idx, f in enumerate(uploaded_files, start=1):
+                        try:
+                            src = AudioSegment.from_file(f, format="mp3")
+                            if normalize:
+                                src = normalize_peak(src, headroom_db=1.0)
+                            processed = safe_fade(src, fade_in_ms=fade_in_ms, fade_out_ms=fade_out_ms)
 
-                    # Normalize peak (nếu chọn)
-                    if normalize:
-                        src = normalize_peak(src, headroom_db=1.0)
+                            out_mp3 = io.BytesIO()
+                            processed.export(out_mp3, format="mp3", bitrate=target_bitrate)
+                            out_mp3.seek(0)
 
-                    # Áp fade an toàn
-                    processed = safe_fade(src, fade_in_ms=fade_in_ms, fade_out_ms=fade_out_ms)
+                            name = f.name if f.name.lower().endswith(".mp3") else f.name + ".mp3"
+                            out_name = prefix_out + name
+                            zf.writestr(out_name, out_mp3.read())
 
-                    # Xuất ra mp3 vào bộ nhớ
-                    out_mp3 = io.BytesIO()
-                    processed.export(out_mp3, format="mp3", bitrate=target_bitrate)
-                    out_mp3.seek(0)
+                            log_area.write(f"✔ Xong: {f.name}")
+                        except Exception as e:
+                            err = f"❌ {f.name}: {e}"
+                            errors.append(err)
+                            log_area.write(err)
 
-                    # Tên file trong ZIP
-                    name = f.name if f.name.lower().endswith(".mp3") else f.name + ".mp3"
-                    out_name = prefix_out + name
+                        progress.progress(idx / total, text=f"Đang xử lý... ({idx}/{total})")
 
-                    zf.writestr(out_name, out_mp3.read())
+                zip_buffer.seek(0)
+                now = datetime.now().strftime("%Y%m%d_%H%M%S")
+                zip_name = f"mp3_faded_{now}.zip"
 
-                except Exception as e:
-                    errors.append(f"❌ {f.name}: {e}")
+            st.success("Hoàn tất! Bạn có thể tải về file ZIP bên dưới.")
+            st.download_button(
+                label="⬇️ Tải ZIP",
+                data=zip_buffer,
+                file_name=zip_name,
+                mime="application/zip",
+            )
+            if errors:
+                with st.expander("Chi tiết lỗi (nếu có)"):
+                    for e in errors:
+                        st.write(e)
 
-        zip_buffer.seek(0)
-        now = datetime.now().strftime("%Y%m%d_%H%M%S")
-        zip_name = f"mp3_faded_{now}.zip"
-
-        st.success("Hoàn tất! Bạn có thể tải về file ZIP bên dưới.")
-        st.download_button(
-            label="⬇️ Tải ZIP",
-            data=zip_buffer,
-            file_name=zip_name,
-            mime="application/zip",
-        )
-
-        if errors:
-            with st.expander("Chi tiết lỗi (nếu có)"):
-                for e in errors:
-                    st.write(e)
+        finally:
+            # luôn mở khóa dù có lỗi
+            st.session_state.processing = False
+            progress.empty()
